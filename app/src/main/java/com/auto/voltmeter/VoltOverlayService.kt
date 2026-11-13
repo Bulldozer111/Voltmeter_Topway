@@ -9,19 +9,29 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
 class VoltOverlayService : Service() {
 
@@ -33,6 +43,11 @@ class VoltOverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // перезапуск системой после убийства процесса (актуально для магнитол)
+        return START_STICKY
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate() {
         super.onCreate()
@@ -40,6 +55,11 @@ class VoltOverlayService : Service() {
         startInForeground()
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            stopSelf()
+            return
+        }
 
         val bgDrawable = GradientDrawable().apply {
             setColor(Color.parseColor("#B3000000"))
@@ -96,7 +116,7 @@ class VoltOverlayService : Service() {
                     MotionEvent.ACTION_MOVE -> {
                         params.x = initialX + (event.rawX - initialTouchX).toInt()
                         params.y = initialY + (event.rawY - initialTouchY).toInt()
-                        windowManager.updateViewLayout(overlayView, params)
+                        try { windowManager.updateViewLayout(overlayView, params) } catch (_: Exception) {}
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
@@ -111,60 +131,82 @@ class VoltOverlayService : Service() {
             }
         })
 
-        windowManager.addView(overlayView, params)
+        try {
+            windowManager.addView(overlayView, params)
+        } catch (_: Exception) {
+            // нет права на оверлей / прошивка запретила - не роняем приложение
+            stopSelf()
+            return
+        }
         startMonitoring()
     }
 
     private fun startMonitoring() {
         val mode = prefs.getString("source_mode", SourceMode.HEAD_UNIT_MCU.name)
-        val internalReader = InternalVoltageReader(this)
-
         serviceScope.launch {
-            if (mode == SourceMode.OBD_ELM327.name) {
-                val macAddress = prefs.getString("selected_mac", null)
-                if (macAddress.isNullOrEmpty()) {
-                    overlayView.text = "NO MAC"
-                    overlayView.setTextColor(Color.YELLOW)
-                    return@launch
-                }
-
-                val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-                val adapter = btManager.adapter
-
-                while (isActive) {
-                    try {
-                        overlayView.text = "OBD..."
-                        overlayView.setTextColor(Color.CYAN)
-
-                        val device = adapter.getRemoteDevice(macAddress)
-                        obdManager = ObdManager(device)
-
-                        if (obdManager?.connect() == true) {
-                            while (isActive) {
-                                val v = obdManager?.readVoltage()
-                                if (v != null) {
-                                    updateDisplay(v)
-                                } else {
-                                    break
-                                }
-                                delay(1500)
-                            }
-                        }
-                    } catch (_: Exception) {}
-
-                    obdManager?.disconnect()
-                    overlayView.text = "WAIT"
-                    overlayView.setTextColor(Color.GRAY)
-                    delay(5000)
-                }
-            } else {
-                while (isActive) {
-                    val v = internalReader.readMcuVoltage()
-                    updateDisplay(v)
-                    delay(1000)
-                }
-            }
+            if (mode == SourceMode.OBD_ELM327.name) runObdLoop() else runInternalLoop()
         }
+    }
+
+    private suspend fun runInternalLoop() {
+        val reader = InternalVoltageReader(this)
+        while (true) {
+            // чтение файлов - не на главном потоке
+            val v = withContext(Dispatchers.IO) {
+                try { reader.readMcuVoltage() } catch (_: Exception) { null }
+            }
+            updateDisplay(v)
+            delay(1000)
+        }
+    }
+
+    private suspend fun runObdLoop() {
+        val macAddress = prefs.getString("selected_mac", null)
+        if (macAddress.isNullOrEmpty()) {
+            show("NO MAC", Color.YELLOW)
+            return
+        }
+
+        val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+
+        while (true) {
+            try {
+                if (adapter == null || !adapter.isEnabled) {
+                    show("BT OFF", Color.YELLOW)
+                } else {
+                    show("OBD...", Color.CYAN)
+                    val device = adapter.getRemoteDevice(macAddress)
+                    val obd = ObdManager(device)
+                    obdManager = obd
+
+                    if (obd.connect()) {
+                        var fails = 0
+                        while (true) {
+                            val v = obd.readVoltage()
+                            if (v != null) {
+                                fails = 0
+                                updateDisplay(v)
+                            } else if (++fails >= 3) {
+                                break // потеряли связь - переподключаемся
+                            }
+                            delay(1500)
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+
+            obdManager?.disconnect()
+            show("WAIT", Color.GRAY)
+            delay(5000)
+        }
+    }
+
+    private fun show(text: String, color: Int) {
+        overlayView.text = text
+        overlayView.setTextColor(color)
     }
 
     private fun updateDisplay(rawVolt: Float?) {
@@ -172,7 +214,7 @@ class VoltOverlayService : Service() {
             val offset = prefs.getFloat("calibration_offset", 0.0f)
             val finalVolt = rawVolt + offset
 
-            overlayView.text = String.format("%.1fV", finalVolt)
+            overlayView.text = String.format(Locale.US, "%.1fV", finalVolt)
             when {
                 finalVolt < 12.1f -> overlayView.setTextColor(Color.parseColor("#FF5252"))
                 finalVolt > 14.8f -> overlayView.setTextColor(Color.parseColor("#FFD740"))
@@ -203,7 +245,11 @@ class VoltOverlayService : Service() {
             .setOngoing(true)
             .build()
 
-        startForeground(101, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(101, notification)
+        }
     }
 
     override fun onDestroy() {

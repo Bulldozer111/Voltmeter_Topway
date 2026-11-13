@@ -4,6 +4,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,9 +14,20 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.*
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Spinner
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -23,6 +37,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerBt: Spinner
     private lateinit var seekBarOffset: SeekBar
     private lateinit var tvOffsetValue: TextView
+    private lateinit var etCustomPath: EditText
+    private lateinit var btnDiag: Button
     private lateinit var btnSaveAndStart: Button
     private lateinit var btnStop: Button
 
@@ -40,12 +56,16 @@ class MainActivity : AppCompatActivity() {
         spinnerBt = findViewById(R.id.spinner_bt)
         seekBarOffset = findViewById(R.id.seek_offset)
         tvOffsetValue = findViewById(R.id.tv_offset_val)
+        etCustomPath = findViewById(R.id.et_custom_path)
+        btnDiag = findViewById(R.id.btn_diag)
         btnSaveAndStart = findViewById(R.id.btn_start)
         btnStop = findViewById(R.id.btn_stop)
 
         val prefs = getSharedPreferences("volt_prefs", Context.MODE_PRIVATE)
 
         loadPairedBluetoothDevices(prefs.getString("selected_mac", null))
+
+        etCustomPath.setText(prefs.getString(InternalVoltageReader.PREF_CUSTOM_PATH, "") ?: "")
 
         val savedOffset = prefs.getFloat("calibration_offset", 0.0f)
         seekBarOffset.max = 100
@@ -74,6 +94,8 @@ class MainActivity : AppCompatActivity() {
             spinnerBt.isEnabled = false
         }
 
+        btnDiag.setOnClickListener { runDiagnostics(prefs.getString(InternalVoltageReader.PREF_CUSTOM_PATH, null)) }
+
         btnSaveAndStart.setOnClickListener {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
                 Toast.makeText(this, "Разрешите отображение поверх других окон!", Toast.LENGTH_LONG).show()
@@ -88,6 +110,15 @@ class MainActivity : AppCompatActivity() {
             editor.putString("source_mode", mode)
             editor.putFloat("calibration_offset", selectedOffset)
 
+            val customPath = etCustomPath.text.toString().trim()
+            if (customPath.isEmpty()) {
+                editor.remove(InternalVoltageReader.PREF_CUSTOM_PATH)
+            } else {
+                editor.putString(InternalVoltageReader.PREF_CUSTOM_PATH, customPath)
+            }
+            // сбросить запомненный рабочий путь, чтобы заново подобрать источник
+            editor.remove("working_path")
+
             if (rbObd.isChecked && pairedDevices.isNotEmpty()) {
                 val pos = spinnerBt.selectedItemPosition
                 if (pos in pairedDevices.indices) {
@@ -98,19 +129,83 @@ class MainActivity : AppCompatActivity() {
 
             val serviceIntent = Intent(this, VoltOverlayService::class.java)
             stopService(serviceIntent)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+                Toast.makeText(this, "Вольтметр запущен", Toast.LENGTH_SHORT).show()
+                finish()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Не удалось запустить: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }
-            Toast.makeText(this, "Вольтметр запущен", Toast.LENGTH_SHORT).show()
-            finish()
         }
 
         btnStop.setOnClickListener {
             stopService(Intent(this, VoltOverlayService::class.java))
             Toast.makeText(this, "Вольтметр остановлен", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun runDiagnostics(customPath: String?) {
+        Toast.makeText(this, "Сбор диагностики…", Toast.LENGTH_SHORT).show()
+        val appContext = applicationContext
+        Thread {
+            val report = try {
+                InternalVoltageReader(appContext).dumpReport()
+            } catch (e: Exception) {
+                "Ошибка диагностики: $e"
+            }
+            val savedPath = saveReport(report)
+            runOnUiThread {
+                if (!isFinishing) showReport(report, savedPath)
+            }
+        }.start()
+    }
+
+    private fun saveReport(report: String): String? {
+        return try {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            val f = File(dir, "voltmeter_report.txt")
+            f.writeText(report)
+            f.absolutePath
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun showReport(report: String, savedPath: String?) {
+        val tv = TextView(this).apply {
+            text = report
+            textSize = 11f
+            setTextIsSelectable(true)
+            setPadding(24, 16, 24, 16)
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+
+        val title = if (savedPath != null) "Диагностика (сохранено: $savedPath)" else "Диагностика"
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(scroll)
+            .setPositiveButton("Копировать") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("voltmeter_report", report))
+                Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Поделиться") { _, _ ->
+                try {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, report)
+                    }
+                    startActivity(Intent.createChooser(send, "Отправить отчёт"))
+                } catch (_: Exception) {
+                    Toast.makeText(this, "Нет приложения для отправки", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
     }
 
     @SuppressLint("MissingPermission")
@@ -140,14 +235,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestNeededPermissions() {
         requestOverlayPermission()
+
+        val needed = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN),
-                    100
-                )
+                needed.add(Manifest.permission.BLUETOOTH_CONNECT)
             }
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        if (needed.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, needed.toTypedArray(), 100)
         }
     }
 
@@ -157,7 +261,17 @@ class MainActivity : AppCompatActivity() {
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName")
             )
-            startActivity(intent)
+            try {
+                startActivity(intent)
+            } catch (_: ActivityNotFoundException) {
+                // на некоторых прошивках магнитол экрана нет - сообщаем, как включить вручную
+                Toast.makeText(
+                    this,
+                    "Откройте: Настройки → Приложения → Бортовой Вольтметр → Поверх других окон",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (_: Exception) {
+            }
         }
     }
 }

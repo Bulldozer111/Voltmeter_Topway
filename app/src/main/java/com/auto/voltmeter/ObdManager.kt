@@ -16,16 +16,27 @@ class ObdManager(private val device: BluetoothDevice) {
     private var inStream: InputStream? = null
     private var outStream: OutputStream? = null
 
+    // "12.4V" - приоритетно; запасной вариант - любое число с точкой
+    private val voltageWithUnit = Regex("(\\d{1,2}[.,]\\d{1,2})\\s*V", RegexOption.IGNORE_CASE)
     private val voltageRegex = Regex("(\\d{1,2}[.,]\\d{1,2})")
 
     @SuppressLint("MissingPermission")
     suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         disconnect()
         try {
-            socket = device.createRfcommSocketToServiceRecord(sppUuid)
-            socket?.connect()
-            inStream = socket?.inputStream
-            outStream = socket?.outputStream
+            var s: BluetoothSocket? = null
+            try {
+                s = device.createRfcommSocketToServiceRecord(sppUuid)
+                s.connect()
+            } catch (e: Exception) {
+                // многие ELM327 клоны подключаются только через insecure-сокет
+                try { s?.close() } catch (_: Exception) {}
+                s = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
+                s.connect()
+            }
+            socket = s
+            inStream = s.inputStream
+            outStream = s.outputStream
 
             sendCommand("AT Z\r")
             Thread.sleep(400)
@@ -41,8 +52,8 @@ class ObdManager(private val device: BluetoothDevice) {
     suspend fun readVoltage(): Float? = withContext(Dispatchers.IO) {
         try {
             val response = sendCommand("AT RV\r")
-            val match = voltageRegex.find(response)
-            val numberStr = match?.value?.replace(",", ".")
+            val match = voltageWithUnit.find(response) ?: voltageRegex.find(response)
+            val numberStr = match?.groupValues?.get(1)?.replace(",", ".")
             numberStr?.toFloatOrNull()
         } catch (e: Exception) {
             null

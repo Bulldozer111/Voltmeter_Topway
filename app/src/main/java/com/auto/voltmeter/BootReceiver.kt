@@ -17,10 +17,14 @@ class BootReceiver : BroadcastReceiver() {
                 return
             }
             val serviceIntent = Intent(context, VoltOverlayService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+            } catch (_: Exception) {
+                // на части прошивок запуск из фона может быть запрещён - не падаем
             }
         }
     }

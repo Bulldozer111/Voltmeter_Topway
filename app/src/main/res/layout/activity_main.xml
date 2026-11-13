@@ -90,6 +90,36 @@
                 android:textStyle="bold" />
         </LinearLayout>
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Свой путь к файлу напряжения (необязательно):"
+            android:textColor="#BDBDBD"
+            android:textSize="15sp" />
+
+        <EditText
+            android:id="@+id/et_custom_path"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#2C2C2C"
+            android:hint="/sys/.../voltage"
+            android:inputType="text"
+            android:padding="12dp"
+            android:singleLine="true"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#757575"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btn_diag"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="12dp"
+            android:text="Диагностика (где магнитола отдаёт напряжение)"
+            android:textSize="14sp" />
+
         <Button
             android:id="@+id/btn_start"
             android:layout_width="match_parent"
