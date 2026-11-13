@@ -36,8 +36,8 @@ class InternalVoltageReader(private val context: Context) {
         private const val RESCAN_INTERVAL_MS = 120_000L
         private const val MAX_SCANNED_ENTRIES = 6000
 
-        // Допустимый диапазон бортсети: просадка при пуске ... 24 В
-        private const val MIN_V = 5.0f
+        // Допустимый диапазон бортсети: просадка при пуске ... 24 В (ниже 7 В - это USB 5 В/мусор)
+        private const val MIN_V = 7.0f
         private const val MAX_V = 32.0f
 
         private val STATIC_PATHS = listOf(
@@ -48,7 +48,6 @@ class InternalVoltageReader(private val context: Context) {
             "/sys/class/misc/mcu/voltage",
             "/sys/class/power_supply/battery/voltage_now",
             "/sys/class/power_supply/ac/voltage_now",
-            "/sys/class/power_supply/usb/voltage_now",
             "/sys/class/power_supply/main/voltage_now",
             "/sys/class/power_supply/bms/voltage_now"
         )
@@ -116,7 +115,7 @@ class InternalVoltageReader(private val context: Context) {
     /**
      * Приводит сырое значение к вольтам.
      *  13.8 -> 13.8 | 138 -> 13.8 | 1380 -> 13.8 | 13800 -> 13.8 | 13800000 -> 13.8
-     * Напряжение Li-ion батареи (3.0-4.5 В) отбрасывается диапазоном.
+     * Li-ion батарея (3.0-4.5 В) и USB (5 В) отбрасываются диапазоном 7-32 В.
      */
     private fun normalize(text: String): Float? {
         val m = Regex("\\d+(?:[.,]\\d+)?").find(text.trim()) ?: return null
@@ -170,7 +169,8 @@ class InternalVoltageReader(private val context: Context) {
                 if (c.isFile) {
                     val n = c.name.lowercase()
                     val looksLikeVoltage = n.contains("volt") || n.contains("vbat")
-                    if (looksLikeVoltage && SKIP_NAME_PARTS.none { n.contains(it) } && c.canRead()) {
+                    val isUsbNode = c.absolutePath.contains("/usb", ignoreCase = true)
+                    if (looksLikeVoltage && !isUsbNode && SKIP_NAME_PARTS.none { n.contains(it) } && c.canRead()) {
                         out.add(c.absolutePath)
                     }
                 } else if (c.isDirectory && depth < maxDepth && c.canonicalPath == c.absolutePath) {

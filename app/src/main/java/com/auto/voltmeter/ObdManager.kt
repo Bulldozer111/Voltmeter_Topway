@@ -24,17 +24,19 @@ class ObdManager(private val device: BluetoothDevice) {
     suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         disconnect()
         try {
-            var s: BluetoothSocket? = null
-            try {
-                s = device.createRfcommSocketToServiceRecord(sppUuid)
-                s.connect()
+            val s: BluetoothSocket = try {
+                device.createRfcommSocketToServiceRecord(sppUuid).also {
+                    socket = it
+                    it.connect()
+                }
             } catch (e: Exception) {
                 // многие ELM327 клоны подключаются только через insecure-сокет
-                try { s?.close() } catch (_: Exception) {}
-                s = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
-                s.connect()
+                try { socket?.close() } catch (_: Exception) {}
+                device.createInsecureRfcommSocketToServiceRecord(sppUuid).also {
+                    socket = it
+                    it.connect()
+                }
             }
-            socket = s
             inStream = s.inputStream
             outStream = s.outputStream
 
